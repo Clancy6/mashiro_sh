@@ -39,17 +39,18 @@ fix_locale() {
     fi
 
     # 确保 en_US.UTF-8 locale 存在
-    if ! locale -a | grep -q en_US.UTF-8; then
+    if ! grep -q "en_US.UTF-8 UTF-8" /etc/locale.gen; then
         echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
-        locale-gen
     fi
+    locale-gen en_US.UTF-8
 
     # 设置系统默认 locale
-    update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 || true
+    update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
     # 更新当前会话的环境变量
     export LANG=en_US.UTF-8
     export LC_ALL=en_US.UTF-8
+    export LANGUAGE=en_US:en
 
     echo "Locale 设置已更新。当前 locale 设置："
     locale
@@ -83,8 +84,8 @@ install_base() {
 
 # 安装OpenResty+PHP+FTP+WAF环境
 install_env() {
-    read -p "请输入要安装的PHP版本,多个版本以空格分隔(默认: 8.3): " install_versions
-    install_versions=${install_versions:-8.3}
+    read -p "请输入要安装的PHP版本,多个版本以空格分隔(默认: 8.2): " install_versions
+    install_versions=${install_versions:-8.2}
 
     read -p "请输入FTP用户名(默认: 随机生成): " ftp_user
     ftp_user=${ftp_user:-$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 8 | head -n 1)}
@@ -189,6 +190,8 @@ install_env() {
             echo -e "${GREEN}$service 启动成功${PLAIN}"
         else
             echo -e "${RED}$service 启动失败${PLAIN}"
+            echo "检查 $service 状态:"
+            systemctl status $service
         fi
     done
 
