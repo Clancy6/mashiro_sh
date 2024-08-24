@@ -1,99 +1,102 @@
 #!/bin/bash
 
-# 日志文件路径
 LOGFILE="install.log"
-touch $LOGFILE
+exec > >(tee -a "$LOGFILE") 2>&1
 
-# 检查命令是否成功执行
-check_command() {
-    if [ $? -eq 0 ]; then
-        echo -e "\e[32m$1: 启动成功\e[0m" | tee -a $LOGFILE
-    else
-        if command -v $2 &> /dev/null; then
-            echo -e "\e[31m$1: 启动失败\e[0m" | tee -a $LOGFILE
-        else
-            echo -e "\e[33m$1: 未安装\e[0m" | tee -a $LOGFILE
-        fi
-    fi
+# 卸载和初始化功能
+function uninstall_services() {
+    echo "正在卸载可能已安装的服务..."
+
+    # 停止服务
+    systemctl stop openresty php8.2-fpm vsftpd ufw 2>/dev/null
+
+    # 卸载 OpenResty
+    apt-get remove --purge -y openresty
+
+    # 卸载 PHP
+    apt-get remove --purge -y php8.2 php8.2-fpm php8.2-mysql php8.2-cli php8.2-curl php8.2-xml php8.2-mbstring
+    apt-get autoremove -y --purge
+
+    # 卸载 vsftpd
+    apt-get remove --purge -y vsftpd
+
+    # 卸载 UFW
+    apt-get remove --purge -y ufw
+
+    # 清理残留的配置文件和依赖
+    apt-get autoremove -y --purge
+    apt-get clean
+    rm -rf /etc/php/8.2 /etc/openresty /etc/vsftpd.conf /etc/ufw /var/lib/ufw
+
+    echo "卸载和初始化完成。"
 }
+
+# 提示用户确认是否要卸载
+read -p "是否卸载已安装的相关服务并初始化系统？[y/N]: " confirm_uninstall
+if [[ "$confirm_uninstall" =~ ^[Yy]$ ]]; then
+    uninstall_services
+else
+    echo "跳过卸载和初始化。"
+fi
 
 # 更新系统并安装基本工具
-apt-get update &>> $LOGFILE
-apt-get install -y curl wget lsb-release ca-certificates gnupg &>> $LOGFILE
+apt-get update && apt-get install -y software-properties-common curl wget gnupg2 ca-certificates lsb-release
 
-# 安装OpenResty
-apt-get install -y software-properties-common &>> $LOGFILE
-wget -qO - https://openresty.org/package/pubkey.gpg | apt-key add - &>> $LOGFILE
-add-apt-repository -y "deb http://openresty.org/package/ubuntu $(lsb_release -sc) main" &>> $LOGFILE
-apt-get update &>> $LOGFILE
-apt-get install -y openresty &>> $LOGFILE
-systemctl start openresty &>> $LOGFILE
-systemctl enable openresty &>> $LOGFILE
-check_command "OpenResty" "openresty"
+# 添加 OpenResty 仓库并安装
+echo "deb http://openresty.org/package/debian $(lsb_release -sc) openresty" | tee /etc/apt/sources.list.d/openresty.list
+wget -qO - https://openresty.org/package/pubkey.gpg | apt-key add -
+apt-get update && apt-get install -y openresty
 
-# 安装PHP 8.3
-add-apt-repository ppa:ondrej/php -y &>> $LOGFILE
-apt-get update &>> $LOGFILE
-apt-get install -y php8.3 php8.3-fpm php8.3-mysql php8.3-cli php8.3-curl php8.3-xml php8.3-mbstring &>> $LOGFILE
-systemctl start php8.3-fpm &>> $LOGFILE
-systemctl enable php8.3-fpm &>> $LOGFILE
-check_command "PHP 8.3" "php8.3-fpm"
+# 启动 OpenResty 并检查状态
+systemctl enable openresty
+systemctl start openresty
+if systemctl status openresty | grep -q "active (running)"; then
+    echo -e "\e[32mOpenResty: 启动成功\e[0m"
+else
+    echo -e "\e[31mOpenResty: 启动失败\e[0m"
+fi
 
-# 安装vsftpd
-apt-get install -y vsftpd &>> $LOGFILE
-systemctl start vsftpd &>> $LOGFILE
-systemctl enable vsftpd &>> $LOGFILE
-check_command "vsftpd (FTP)" "vsftpd"
+# 安装 PHP 8.2
+add-apt-repository ppa:ondrej/php -y
+apt-get update && apt-get install -y php8.2 php8.2-fpm php8.2-mysql php8.2-cli php8.2-curl php8.2-xml php8.2-mbstring
 
-# 创建随机FTP用户
-FTP_USER="ftpuser_$(date +%s | sha256sum | base64 | head -c 8)"
+# 启动 PHP 8.2 并检查状态
+systemctl enable php8.2-fpm
+systemctl start php8.2-fpm
+if systemctl status php8.2-fpm | grep -q "active (running)"; then
+    echo -e "\e[32mPHP 8.2: 启动成功\e[0m"
+else
+    echo -e "\e[31mPHP 8.2: 启动失败\e[0m"
+fi
+
+# 安装 vsftpd 并配置
+apt-get install -y vsftpd
+FTP_USER="ftpuser_$(openssl rand -hex 4)"
 FTP_PASS=$(openssl rand -base64 12)
-useradd -m -s /usr/sbin/nologin $FTP_USER &>> $LOGFILE
-echo -e "$FTP_USER:$FTP_PASS" | chpasswd &>> $LOGFILE
+useradd -m -s /bin/bash "$FTP_USER"
+echo "$FTP_USER:$FTP_PASS" | chpasswd
 
-# 显示FTP用户信息
-echo "FTP用户: $FTP_USER" | tee -a $LOGFILE
-echo "FTP密码: $FTP_PASS" | tee -a $LOGFILE
+# 启动 FTP 并检查状态
+systemctl enable vsftpd
+systemctl start vsftpd
+if systemctl status vsftpd | grep -q "active (running)"; then
+    echo -e "\e[32mvsftpd (FTP): 启动成功\e[0m"
+    echo "FTP用户: $FTP_USER"
+    echo "FTP密码: $FTP_PASS"
+else
+    echo -e "\e[31mvsftpd (FTP): 启动失败\e[0m"
+fi
 
-# 配置vsftpd
-cat <<EOF >> /etc/vsftpd.conf
-listen=NO
-listen_ipv6=YES
-anonymous_enable=NO
-local_enable=YES
-write_enable=YES
-local_umask=022
-chroot_local_user=YES
-allow_writeable_chroot=YES
-EOF
-systemctl restart vsftpd &>> $LOGFILE
+# 安装并配置 UFW
+apt-get install -y ufw
+ufw allow 21/tcp
+ufw allow 80/tcp
+ufw allow 443/tcp
+ufw allow from any to any port 21 proto tcp
+ufw enable
 
-# 配置防火墙
-ufw allow 21/tcp &>> $LOGFILE
-ufw allow 80/tcp &>> $LOGFILE
-ufw allow 443/tcp &>> $LOGFILE
-ufw allow 21/tcp from any to any proto tcp && ufw allow 80/tcp from any to any proto tcp && ufw allow 443/tcp from any to any proto tcp &>> $LOGFILE
-ufw reload &>> $LOGFILE
+# 允许 IPv6 流量
+sed -i 's/IPV6=no/IPV6=yes/g' /etc/default/ufw
+ufw reload
 
-# 配置简单WAF（阻止常见SQL注入模式）
-cat << 'EOF' > /usr/local/openresty/nginx/conf/waf.conf
-if ($query_string ~* "union.*select.*\(" ) {
-    return 403;
-}
-if ($query_string ~* "select.*from.*information_schema.tables" ) {
-    return 403;
-}
-if ($query_string ~* "select.*from.*mysql.db" ) {
-    return 403;
-}
-EOF
-echo 'include /usr/local/openresty/nginx/conf/waf.conf;' >> /usr/local/openresty/nginx/conf/nginx.conf
-systemctl reload openresty &>> $LOGFILE
-
-# 检查服务状态
-check_command "OpenResty" "openresty"
-check_command "PHP 8.3" "php8.3-fpm"
-check_command "vsftpd (FTP)" "vsftpd"
-
-# 完成
-echo "部署完成。详细日志请查看 $LOGFILE"
+echo -e "\e[33m安装过程日志保存在 $LOGFILE\e[0m"
