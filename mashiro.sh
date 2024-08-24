@@ -21,6 +21,23 @@ show_banner() {
     echo
 }
 
+# 修复 locale 设置
+fix_locale() {
+    if [ -f /etc/debian_version ]; then
+        apt-get update
+        apt-get install -y locales
+    elif [ -f /etc/redhat-release ]; then
+        yum install -y glibc-common
+    fi
+
+    locale-gen en_US.UTF-8
+    update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+    export LANG=en_US.UTF-8
+    export LC_ALL=en_US.UTF-8
+
+    echo "Locale 设置已更新。"
+}
+
 # 检测系统版本
 check_release() {
     if [ -f /etc/redhat-release ]; then
@@ -32,7 +49,7 @@ check_release() {
     elif cat /etc/issue | grep -Eqi "centos|red hat|redhat"; then
         release="centos"
     else
-        echo -e "不支持当前操作系统" && exit 1
+        echo -e "${RED}不支持当前操作系统${PLAIN}" && exit 1
     fi
 }
 
@@ -49,40 +66,27 @@ install_base() {
 
 # 安装OpenResty+PHP+FTP+WAF环境
 install_env() {
-    # 获取用户输入的PHP版本,默认为83
     read -p "请输入要安装的PHP版本,多个版本以空格分隔(默认: 83): " install_versions
     install_versions=${install_versions:-83}
 
-    # 获取用户输入的FTP用户名,默认为随机用户名
     read -p "请输入FTP用户名(默认: 随机生成): " ftp_user
     ftp_user=${ftp_user:-$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 8 | head -n 1)}
 
-    # 获取用户输入的FTP密码,默认为随机强密码
     read -p "请输入FTP密码(默认: 随机生成): " ftp_pass
     ftp_pass=${ftp_pass:-$(cat /dev/urandom | tr -dc 'a-zA-Z0-9!@#$%^&*-+=' | fold -w 16 | head -n 1)}
 
-    # 安装基础环境
     install_base
     
     # 安装OpenResty
     if [ "$release" == "centos" ]; then
-        # CentOS
         yum -y install pcre-devel openssl-devel gcc curl
         wget https://openresty.org/package/centos/openresty.repo -O /etc/yum.repos.d/openresty.repo
         yum -y install openresty
-    elif [ "$release" == "ubuntu" ]; then
-        # Ubuntu 
+    else
         apt-get -y install libpcre3-dev libssl-dev perl make build-essential curl zlib1g-dev
         wget -qO - https://openresty.org/package/pubkey.gpg | sudo apt-key add -
         echo "deb http://openresty.org/package/ubuntu $(lsb_release -sc) main" > /etc/apt/sources.list.d/openresty.list
         apt-get update 
-        apt-get -y install openresty
-    elif [ "$release" == "debian" ]; then
-        # Debian
-        apt-get -y install libpcre3-dev libssl-dev perl make build-essential curl zlib1g-dev
-        wget -qO - https://openresty.org/package/pubkey.gpg | sudo apt-key add -
-        echo "deb http://openresty.org/package/debian $(lsb_release -sc) openresty" > /etc/apt/sources.list.d/openresty.list
-        apt-get update
         apt-get -y install openresty
     fi
 
@@ -116,12 +120,8 @@ install_env() {
     # 安装并配置FTP服务
     if [ "$release" == "centos" ]; then
         yum -y install vsftpd
-        systemctl enable vsftpd
-        systemctl start vsftpd
     else
         apt-get -y install vsftpd
-        systemctl enable vsftpd
-        systemctl start vsftpd
     fi
 
     # 创建FTP用户并设置主目录为网站根目录
@@ -132,49 +132,59 @@ install_env() {
     # 安装并配置WAF
     if [ "$release" == "centos" ]; then
         yum -y install mod_security
-        
-        # 配置mod_security
         sed -i 's/SecRuleEngine DetectionOnly/SecRuleEngine On/' /etc/httpd/conf.d/mod_security.conf
         sed -i 's/SecRequestBodyAccess On/SecRequestBodyAccess Off/' /etc/httpd/conf.d/mod_security.conf
-        
-        # 下载OWASP ModSecurity规则集
         git clone https://github.com/SpiderLabs/owasp-modsecurity-crs.git /etc/httpd/crs
         cd /etc/httpd/crs
         cp crs-setup.conf.example crs-setup.conf
-        
-        # 在Apache主配置文件中引入OWASP ModSecurity规则集  
         echo "Include /etc/httpd/crs/crs-setup.conf" >> /etc/httpd/conf/httpd.conf
         echo "Include /etc/httpd/crs/rules/*.conf" >> /etc/httpd/conf/httpd.conf
-        
-        systemctl restart httpd
     else
         apt-get -y install libapache2-mod-security2
-        
-        # 配置mod_security
         sed -i 's/SecRuleEngine DetectionOnly/SecRuleEngine On/' /etc/modsecurity/modsecurity.conf
         sed -i 's/SecRequestBodyAccess On/SecRequestBodyAccess Off/' /etc/modsecurity/modsecurity.conf
-        
-        # 下载OWASP ModSecurity规则集
         git clone https://github.com/SpiderLabs/owasp-modsecurity-crs.git /etc/modsecurity/crs
         cd /etc/modsecurity/crs  
         cp crs-setup.conf.example crs-setup.conf
-        
-        # 在Apache主配置文件中引入OWASP ModSecurity规则集
         echo "Include /etc/modsecurity/crs/crs-setup.conf" >> /etc/apache2/apache2.conf
         echo "Include /etc/modsecurity/crs/rules/*.conf" >> /etc/apache2/apache2.conf
-        
-        systemctl restart apache2
     fi
 
-    # 配置OpenResty 
-    systemctl enable openresty
-    systemctl start openresty
+    # 配置OpenResty
+    nginx_conf="/usr/local/openresty/nginx/conf/nginx.conf"
+    sed -i 's/worker_processes  1;/worker_processes  auto;/' $nginx_conf
+    sed -i '/http {/a \    client_max_body_size 50m;' $nginx_conf
+    
+    # 配置 PHP-FPM
+    fpm_conf="/etc/php/$default_ver/fpm/pool.d/www.conf"
+    sed -i 's/^user = www-data/user = nginx/' $fpm_conf
+    sed -i 's/^group = www-data/group = nginx/' $fpm_conf
+    sed -i 's/^listen = \/run\/php\/php'"$default_ver"'-fpm.sock/listen = 127.0.0.1:9000/' $fpm_conf
+
+    # 启动并检查服务状态
+    services=("openresty" "php$default_ver-fpm" "vsftpd")
+    if [ "$release" == "centos" ]; then
+        services+=("httpd")
+    else
+        services+=("apache2")
+    fi
+
+    for service in "${services[@]}"
+    do
+        systemctl enable $service
+        systemctl start $service
+        if systemctl is-active --quiet $service; then
+            echo -e "${GREEN}$service 启动成功${PLAIN}"
+        else
+            echo -e "${RED}$service 启动失败${PLAIN}"
+        fi
+    done
 
     echo "============================"
     echo "OpenResty + 多PHP版本 + FTP + WAF 环境一键部署脚本执行完毕!"
     echo "网站根目录为: $ftp_dir"
     echo "FTP登录信息如下:"
-    echo "主机: $(curl -s -6 https://api64.ipify.org || echo '获取失败')"
+    echo "主机: $(curl -s ipv4.icanhazip.com || echo '获取失败')"
     echo "用户名: $ftp_user"
     echo "密码: $ftp_pass"
     echo "============================"
@@ -184,6 +194,7 @@ install_env() {
 main() {
     show_banner
     check_release
+    fix_locale
     install_env
 }
 
