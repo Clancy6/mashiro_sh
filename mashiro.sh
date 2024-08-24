@@ -38,12 +38,21 @@ fix_locale() {
         yum install -y glibc-common
     fi
 
-    locale-gen en_US.UTF-8
-    update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+    # 确保 en_US.UTF-8 locale 存在
+    if ! locale -a | grep -q en_US.UTF-8; then
+        echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
+        locale-gen
+    fi
+
+    # 设置系统默认 locale
+    update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 || true
+
+    # 更新当前会话的环境变量
     export LANG=en_US.UTF-8
     export LC_ALL=en_US.UTF-8
 
-    echo "Locale 设置已更新。"
+    echo "Locale 设置已更新。当前 locale 设置："
+    locale
 }
 
 # 检测系统版本
@@ -87,14 +96,16 @@ install_env() {
     
     # 安装OpenResty
     if [ "$release" == "centos" ]; then
-        yum -y install pcre-devel openssl-devel gcc curl
-        wget https://openresty.org/package/centos/openresty.repo -O /etc/yum.repos.d/openresty.repo
+        yum -y install yum-utils
+        yum-config-manager --add-repo https://openresty.org/package/centos/openresty.repo
         yum -y install openresty
     else
-        apt-get -y install libpcre3-dev libssl-dev perl make build-essential curl zlib1g-dev
-        wget -qO - https://openresty.org/package/pubkey.gpg | sudo apt-key add -
-        echo "deb http://openresty.org/package/ubuntu $(lsb_release -sc) main" > /etc/apt/sources.list.d/openresty.list
-        apt-get update 
+        apt-get -y install --no-install-recommends wget gnupg ca-certificates
+        wget -O - https://openresty.org/package/pubkey.gpg | apt-key add -
+        codename=$(lsb_release -c | cut -f2)
+        echo "deb http://openresty.org/package/debian $codename openresty" \
+            | tee /etc/apt/sources.list.d/openresty.list
+        apt-get update
         apt-get -y install openresty
     fi
 
