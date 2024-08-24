@@ -6,6 +6,14 @@ RED='\033[0;31m'
 YELLOW='\033[0;33m'
 PLAIN='\033[0m'
 
+# 创建日志目录和文件
+log_dir="./mashiro_sh"
+mkdir -p "$log_dir"
+log_file="$log_dir/$(date +%Y-%m-%d_%H:%M:%S).log"
+
+# 重定向所有输出到日志文件
+exec > >(tee -a "$log_file") 2>&1
+
 # 显示脚本名称和网址
 show_banner() {
     clear
@@ -66,8 +74,8 @@ install_base() {
 
 # 安装OpenResty+PHP+FTP+WAF环境
 install_env() {
-    read -p "请输入要安装的PHP版本,多个版本以空格分隔(默认: 83): " install_versions
-    install_versions=${install_versions:-83}
+    read -p "请输入要安装的PHP版本,多个版本以空格分隔(默认: 8.3): " install_versions
+    install_versions=${install_versions:-8.3}
 
     read -p "请输入FTP用户名(默认: 随机生成): " ftp_user
     ftp_user=${ftp_user:-$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 8 | head -n 1)}
@@ -90,21 +98,19 @@ install_env() {
         apt-get -y install openresty
     fi
 
-    # 从PHP官方API获取可用PHP版本
-    php_versions=$(curl -s https://www.php.net/releases/index.php?json&version=8 | grep -oP '"\K[0-9]+' | tr '\n' ' ')
-    echo "检测到以下可用的PHP版本: $php_versions"
-
     # 安装用户选择的多个PHP版本
     for ver in $install_versions
     do
-        if [[ $php_versions =~ $ver ]]; then
-            if [ "$release" == "centos" ]; then
-                yum -y install php$ver php$ver-fpm php$ver-cli php$ver-common
-            else
-                apt-get -y install php$ver php$ver-fpm php$ver-cli php$ver-common 
-            fi
+        if [ "$release" == "centos" ]; then
+            yum -y install http://rpms.remirepo.net/enterprise/remi-release-7.rpm
+            yum -y install yum-utils
+            yum-config-manager --enable remi-php${ver//./}
+            yum -y install php php-fpm php-cli php-common
         else
-            echo "跳过安装无效的PHP版本: $ver"
+            apt-get -y install software-properties-common
+            add-apt-repository -y ppa:ondrej/php
+            apt-get update
+            apt-get -y install php${ver} php${ver}-fpm php${ver}-cli php${ver}-common 
         fi
     done
 
@@ -129,26 +135,22 @@ install_env() {
     useradd -d $ftp_dir -s /sbin/nologin $ftp_user
     echo "$ftp_user:$ftp_pass" | chpasswd
 
-    # 安装并配置WAF
+    # 安装并配置WAF (使用ModSecurity for NGINX)
     if [ "$release" == "centos" ]; then
-        yum -y install mod_security
-        sed -i 's/SecRuleEngine DetectionOnly/SecRuleEngine On/' /etc/httpd/conf.d/mod_security.conf
-        sed -i 's/SecRequestBodyAccess On/SecRequestBodyAccess Off/' /etc/httpd/conf.d/mod_security.conf
-        git clone https://github.com/SpiderLabs/owasp-modsecurity-crs.git /etc/httpd/crs
-        cd /etc/httpd/crs
-        cp crs-setup.conf.example crs-setup.conf
-        echo "Include /etc/httpd/crs/crs-setup.conf" >> /etc/httpd/conf/httpd.conf
-        echo "Include /etc/httpd/crs/rules/*.conf" >> /etc/httpd/conf/httpd.conf
+        yum -y install nginx-mod-http-modsecurity
     else
-        apt-get -y install libapache2-mod-security2
-        sed -i 's/SecRuleEngine DetectionOnly/SecRuleEngine On/' /etc/modsecurity/modsecurity.conf
-        sed -i 's/SecRequestBodyAccess On/SecRequestBodyAccess Off/' /etc/modsecurity/modsecurity.conf
-        git clone https://github.com/SpiderLabs/owasp-modsecurity-crs.git /etc/modsecurity/crs
-        cd /etc/modsecurity/crs  
-        cp crs-setup.conf.example crs-setup.conf
-        echo "Include /etc/modsecurity/crs/crs-setup.conf" >> /etc/apache2/apache2.conf
-        echo "Include /etc/modsecurity/crs/rules/*.conf" >> /etc/apache2/apache2.conf
+        apt-get -y install nginx-module-modsecurity
     fi
+
+    git clone --depth 1 -b v3/master --single-branch https://github.com/SpiderLabs/ModSecurity /tmp/ModSecurity
+    git clone --depth 1 https://github.com/SpiderLabs/ModSecurity-nginx.git /tmp/ModSecurity-nginx
+
+    # 编译并安装ModSecurity-nginx模块
+    cd /tmp/ModSecurity
+    ./build.sh
+    ./configure
+    make
+    make install
 
     # 配置OpenResty
     nginx_conf="/usr/local/openresty/nginx/conf/nginx.conf"
@@ -156,18 +158,17 @@ install_env() {
     sed -i '/http {/a \    client_max_body_size 50m;' $nginx_conf
     
     # 配置 PHP-FPM
-    fpm_conf="/etc/php/$default_ver/fpm/pool.d/www.conf"
+    if [ "$release" == "centos" ]; then
+        fpm_conf="/etc/php-fpm.d/www.conf"
+    else
+        fpm_conf="/etc/php/${default_ver}/fpm/pool.d/www.conf"
+    fi
     sed -i 's/^user = www-data/user = nginx/' $fpm_conf
     sed -i 's/^group = www-data/group = nginx/' $fpm_conf
     sed -i 's/^listen = \/run\/php\/php'"$default_ver"'-fpm.sock/listen = 127.0.0.1:9000/' $fpm_conf
 
     # 启动并检查服务状态
-    services=("openresty" "php$default_ver-fpm" "vsftpd")
-    if [ "$release" == "centos" ]; then
-        services+=("httpd")
-    else
-        services+=("apache2")
-    fi
+    services=("openresty" "php${default_ver}-fpm" "vsftpd")
 
     for service in "${services[@]}"
     do
@@ -187,6 +188,7 @@ install_env() {
     echo "主机: $(curl -s ipv4.icanhazip.com || echo '获取失败')"
     echo "用户名: $ftp_user"
     echo "密码: $ftp_pass"
+    echo "日志文件位置: $log_file"
     echo "============================"
 }
 
